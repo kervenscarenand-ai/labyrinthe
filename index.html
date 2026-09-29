@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Le Labyrinthe des Épreuves</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#e67e22">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+* { box-sizing: border-box; font-family: 'Courier New', Courier, monospace; touch-action: manipulation; }
+body { margin: 0; background: #0f0f13; color: #d0d0d5; display: flex; justify-content: center;
+  padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); }
+#game-container { position: relative; width: 100%; max-width: 800px; background: #181820; border: 2px solid #333344; padding: 20px; border-radius: 8px; box-shadow: 0 0 20px rgba(0,0,0,0.8); }
+h1 { color: #e67e22; text-align: center; margin-top: 0; text-transform: uppercase; letter-spacing: 2px; font-size: 1.4em; }
+#stats-bar { display: flex; flex-wrap: wrap; gap: 6px 16px; justify-content: space-between; background: #22222e; padding: 10px 15px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #e67e22; font-weight: bold; font-size: 0.9em; }
+#text-log { height: 300px; background: #0c0c10; border: 1px solid #2a2a38; border-radius: 5px; padding: 15px; overflow-y: auto; margin-bottom: 15px; font-size: 0.95em; line-height: 1.5; }
+.log-entry { margin-bottom: 10px; }
+.system { color: #f1c40f; }
+.combat { color: #e74c3c; }
+.gain { color: #2ecc71; }
+#controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+button { background: #2c3e50; color: #fff; border: 1px solid #455a64; padding: 12px; font-size: 0.9em; border-radius: 4px; cursor: pointer; transition: 0.2s; font-weight: bold; }
+button:hover { background: #34495e; border-color: #e67e22; }
+button:disabled { opacity: 0.5; cursor: default; }
+#custom-action-container { display: flex; gap: 10px; }
+input[type="text"] { flex-grow: 1; min-width: 0; padding: 12px; background: #0c0c10; border: 1px solid #333344; color: #fff; border-radius: 4px; font-size: 16px; }
+input[type="text"]:focus { border-color: #e67e22; outline: none; }
+#gameover { display: none; position: absolute; inset: 0; background: rgba(12,12,16,0.96); border-radius: 8px; flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center; padding: 20px; z-index: 2; }
+#gameover.show { display: flex; }
+#gameover h2 { color: #e74c3c; margin: 0; }
+#gameover p { margin: 0; }
+</style>
+</head>
+<body>
+
+<div id="game-container">
+  <h1>Labyrinthe des Épreuves</h1>
+
+  <div id="stats-bar">
+    <span>Niv. <span id="level">1</span></span>
+    <span>PV <span id="hp">100</span>/<span id="max-hp">100</span></span>
+    <span>XP <span id="xp">0</span>/<span id="next-xp">100</span></span>
+    <span>Puissance <span id="power">10</span></span>
+    <span>Potions <span id="potions">2</span></span>
+  </div>
+
+  <div id="text-log"></div>
+
+  <div id="controls">
+    <button onclick="playerAction('sword')">🗡️ Attaque à l'Épée</button>
+    <button onclick="playerAction('magic')">✨ Sort Magique</button>
+    <button onclick="playerAction('heal')">🧪 Utiliser une Potion</button>
+    <button onclick="playerAction('explore')">🔍 Explorer la pièce</button>
+  </div>
+
+  <div id="custom-action-container">
+    <input type="text" id="custom-input" placeholder="Ou décris ton action (fuir, te défendre...)" onkeydown="if(event.key==='Enter') sendCustomAction()">
+    <button onclick="sendCustomAction()">Agir</button>
+  </div>
+
+  <div id="gameover">
+    <h2>💀 Vous avez succombé</h2>
+    <p id="gameover-msg"></p>
+    <button onclick="restart()">Recommencer l'aventure</button>
+  </div>
+</div>
+
+<script>
+const SAVE_KEY = 'labyrinthe-save-v1';
+const newPlayer = () => ({ level: 1, hp: 100, maxHp: 100, xp: 0, nextXp: 100, power: 10, potions: 2 });
+
+let player = newPlayer();
+let currentEnemy = null;
+let busy = false;     // bloque les actions pendant le tour ennemi / l'apparition
+let dead = false;
+let guard = false;    // garde active : réduit de moitié le prochain coup reçu
+let weakness = 0;     // bonus de dégâts pour la prochaine attaque
+
+const enemies = [
+  { name: "Gobelin des Profondeurs", hp: 30, power: 6, xpYield: 50 },
+  { name: "Squelette Guerrier", hp: 55, power: 12, xpYield: 90 },
+  { name: "Acromentule de l'Ombre", hp: 90, power: 18, xpYield: 150 },
+  { name: "Gardien de Pierre", hp: 140, power: 25, xpYield: 250 }
+];
+
+function esc(s) {
+  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function save() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(player)); } catch (e) {} }
+function clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} }
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SAVE_KEY));
+    if (s && s.hp > 0) return Object.assign(newPlayer(), s);
+  } catch (e) {}
+  return null;
+}
+
+function log(text, type = '') {
+  const logBox = document.getElementById('text-log');
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${type}`;
+  entry.innerHTML = text;
+  logBox.appendChild(entry);
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+function updateUi() {
+  document.getElementById('level').innerText = player.level;
+  document.getElementById('hp').innerText = player.hp;
+  document.getElementById('max-hp').innerText = player.maxHp;
+  document.getElementById('xp').innerText = player.xp;
+  document.getElementById('next-xp').innerText = player.nextXp;
+  document.getElementById('power').innerText = player.power;
+  document.getElementById('potions').innerText = player.potions;
+}
+
+function initGame() {
+  document.getElementById('text-log').innerHTML = '';
+  document.getElementById('gameover').classList.remove('show');
+  dead = false; busy = false; guard = false; weakness = 0;
+  const saved = load();
+  if (saved) {
+    player = saved;
+    log("Vous reprenez votre aventure au cœur du Labyrinthe...", "system");
+  } else {
+    player = newPlayer();
+    log("Vous vous réveillez au cœur du Labyrinthe. Une épée courte et un grimoire usé sont à vos pieds.", "system");
+    log("Un souffle glacial balaye la pièce... Un ennemi approche !", "system");
+  }
+  spawnEnemy();
+  updateUi();
+}
+
+function restart() { clearSave(); initGame(); }
+
+function spawnEnemy() {
+  const t = enemies[Math.min(player.level - 1, enemies.length - 1)];
+  const boost = player.level - 1;
+  currentEnemy = { name: t.name, hp: t.hp + boost * 15, power: t.power + boost * 3, xpYield: t.xpYield };
+  log(`<strong>Un ${currentEnemy.name} surgit de l'ombre !</strong> (PV: ${currentEnemy.hp})`, "combat");
+  busy = false;
+}
+
+function checkLevelUp() {
+  while (player.xp >= player.nextXp) {
+    player.level++;
+    player.xp -= player.nextXp;
+    player.nextXp = Math.floor(player.nextXp * 1.5);
+    player.maxHp += 25;
+    player.hp = player.maxHp;
+    player.power += 7;
+    log(`🌟 <strong>NIVEAU ${player.level} !</strong> Vos PV max et votre puissance augmentent !`, "gain");
+  }
+}
+
+function takeBonus() { const b = weakness; weakness = 0; return b; }
+
+function endPlayerTurn() {
+  updateUi();
+  if (currentEnemy.hp <= 0) { victory(); return; }
+  busy = true;
+  setTimeout(enemyTurn, 800);
+}
+
+function victory() {
+  busy = true;
+  const e = currentEnemy;
+  currentEnemy = null;
+  log(`💥 <strong>Vous avez vaincu le ${e.name} !</strong>`, "gain");
+  player.xp += e.xpYield;
+  log(`Vous gagnez +${e.xpYield} XP !`, "gain");
+  if (Math.random() > 0.5) {
+    player.potions++;
+    log("🧪 Vous trouvez une potion de soin sur la dépouille !", "gain");
+  }
+  checkLevelUp();
+  updateUi();
+  save();
+  log("Vous vous enfoncez plus profondément dans le labyrinthe...", "system");
+  setTimeout(spawnEnemy, 2000);
+}
+
+function enemyTurn() {
+  if (!currentEnemy || currentEnemy.hp <= 0) return;
+  let dmg = Math.floor(Math.random() * currentEnemy.power) + 3;
+  if (guard) {
+    dmg = Math.floor(dmg / 2);
+    guard = false;
+    log("🛡️ Votre garde amortit le coup !", "gain");
+  }
+  player.hp = Math.max(0, player.hp - dmg);
+  log(`Le ${currentEnemy.name} vous attaque et vous inflige ${dmg} points de dégâts !`, "combat");
+  updateUi();
+  if (player.hp <= 0) { gameOver(); return; }
+  busy = false;
+  save();
+}
+
+function gameOver() {
+  dead = true;
+  busy = true;
+  clearSave();
+  log("💀 <strong>Vous avez succombé dans les profondeurs du labyrinthe...</strong>", "combat");
+  document.getElementById('gameover-msg').innerText = `Vous avez atteint le niveau ${player.level}.`;
+  document.getElementById('gameover').classList.add('show');
+}
+
+function playerAction(type) {
+  if (busy || dead || !currentEnemy) return;
+
+  if (type === 'sword') {
+    const dmg = Math.floor(Math.random() * player.power) + 8 + takeBonus();
+    currentEnemy.hp -= dmg;
+    log(`Vous frappez le ${currentEnemy.name} avec votre épée et infligez ${dmg} dégâts.`);
+  } else if (type === 'magic') {
+    const dmg = Math.floor(Math.random() * player.power) + 12 + takeBonus();
+    currentEnemy.hp -= dmg;
+    log(`Vous canalisez les runes du grimoire ! Un éclair magique inflige ${dmg} dégâts au ${currentEnemy.name}.`);
+  } else if (type === 'heal') {
+    if (player.potions <= 0) { log("Vous n'avez plus de potions !", "system"); return; }
+    player.potions--;
+    player.hp = Math.min(player.maxHp, player.hp + 40);
+    log(`Vous buvez une potion et récupérez 40 PV. (Potions restantes : ${player.potions})`, "gain");
+  } else if (type === 'guard') {
+    guard = true;
+    log("🛡️ Vous vous mettez en garde : le prochain coup sera réduit de moitié.");
+  } else if (type === 'explore') {
+    const r = Math.random();
+    if (r < 0.3) {
+      player.potions++;
+      log("🧪 En fouillant la pièce, vous trouvez une potion !", "gain");
+    } else if (r < 0.65) {
+      weakness = 8;
+      log("Vous repérez une faille dans la garde de l'ennemi : votre prochaine attaque fera +8 dégâts.", "gain");
+    } else {
+      log("Vous ne trouvez rien d'utile, et l'ennemi en profite...");
+    }
+  }
+  endPlayerTurn();
+}
+
+function flee() {
+  if (Math.random() < 0.5) {
+    log("Vous vous échappez de justesse !", "system");
+    currentEnemy = null;
+    busy = true;
+    save();
+    setTimeout(spawnEnemy, 1500);
+  } else {
+    log("Le " + currentEnemy.name + " vous barre la route !", "combat");
+    endPlayerTurn();
+  }
+}
+
+function sendCustomAction() {
+  const input = document.getElementById('custom-input');
+  const text = input.value.trim();
+  if (!text || busy || dead || !currentEnemy) return;
+  input.value = '';
+  log(`<em>Action : « ${esc(text)} »</em>`);
+
+  const t = text.toLowerCase();
+  if (/fui|cours|court|échapp|echapp/.test(t)) flee();
+  else if (/potion|soign|boi/.test(t)) playerAction('heal');
+  else if (/défen|defen|garde|bouclier|para|protèg|proteg/.test(t)) playerAction('guard');
+  else if (/magie|sort|éclair|eclair|rune|feu/.test(t)) playerAction('magic');
+  else if (/épée|epee|frapp|attaq|coup|tranch/.test(t)) playerAction('sword');
+  else {
+    if (Math.random() < 0.6) {
+      const dmg = Math.floor(Math.random() * player.power) + 6 + takeBonus();
+      currentEnemy.hp -= dmg;
+      log(`Votre idée fonctionne ! Le ${currentEnemy.name} est désorienté et subit ${dmg} dégâts.`);
+    } else {
+      log("Votre tentative échoue...");
+    }
+    endPlayerTurn();
+  }
+}
+
+window.onload = initGame;
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+</script>
+</body>
+</html>
